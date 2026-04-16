@@ -2,12 +2,15 @@
  * GitTrace — GitHub API Service
  * ------------------------------------------------------------
  * Handles all GitHub REST API communication through Octokit.
+ * NO mock-data fallback — always hits the live API.
  *
  * KEY FEATURES:
- *  1. Fetches the last 50 commits for any public repo.
- *  2. LocalStorage caching layer with a 1-hour TTL to respect
- *     GitHub's unauthenticated rate limit (60 requests / hour).
- *  3. Structured error objects for 404, 403 (rate-limit), and
+ *  1. Fetches the last 30 commits for any public repo.
+ *  2. Enriches the top 15 commits with detailed file-change
+ *     data via individual commit fetches (Promise.allSettled).
+ *  3. LocalStorage caching with a 60-minute TTL — stores the
+ *     enriched data so the detail-fetch doesn't re-run.
+ *  4. Structured error objects for 404, 403 (rate-limit), and
  *     generic failures — no thrown exceptions leak to the UI.
  *
  * USAGE:
@@ -32,7 +35,8 @@ const octokit = new Octokit({
 // ------------------------------------------------------------
 // 2. Cache Configuration
 // ------------------------------------------------------------
-const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour in milliseconds
+const CACHE_TTL_MS = 60 * 60 * 1000; // 60 minutes in milliseconds
+const DETAIL_FETCH_LIMIT = 15;        // Max commits to enrich with file data
 
 /**
  * Generate a deterministic LocalStorage key for a given repo.
@@ -55,7 +59,7 @@ const readCache = (key) => {
 
     const { timestamp, data } = JSON.parse(raw);
 
-    // Check freshness — return null if older than TTL
+    // Check freshness — return null if older than 60 minutes
     if (Date.now() - timestamp > CACHE_TTL_MS) {
       localStorage.removeItem(key); // evict stale entry
       return null;
@@ -87,17 +91,51 @@ const writeCache = (key, data) => {
 };
 
 // ------------------------------------------------------------
-// 3. Public API
+// 3. Detail Fetcher
 // ------------------------------------------------------------
 
 /**
- * Fetch the last 50 commits for a public GitHub repository.
+ * Fetch detailed commit data (including the `files` array) for
+ * a single commit SHA via GET /repos/{owner}/{repo}/commits/{sha}.
+ *
+ * @param {string} owner - Repository owner
+ * @param {string} repo  - Repository name
+ * @param {string} sha   - The commit SHA to fetch
+ * @returns {Promise<{files: Array, stats: Object}|null>}
+ */
+async function fetchCommitDetail(owner, repo, sha) {
+  try {
+    const { data } = await octokit.rest.repos.getCommit({
+      owner,
+      repo,
+      ref: sha,
+    });
+    return {
+      files: data.files ?? [],
+      stats: data.stats ?? {},
+    };
+  } catch (err) {
+    // Individual commit fetch failure is non-fatal — log and return null
+    console.warn(`[GitTrace] Failed to fetch detail for ${sha.slice(0, 7)}:`, err.message);
+    return null;
+  }
+}
+
+// ------------------------------------------------------------
+// 4. Public API
+// ------------------------------------------------------------
+
+/**
+ * Fetch the last 30 commits for a public GitHub repository,
+ * then enrich the top 15 with detailed file-change data.
  *
  * Flow:
- *   1. Check LocalStorage cache → return if fresh.
- *   2. Call GitHub REST API via Octokit.
- *   3. Cache the response and return the commit array.
- *   4. On error, return a structured error object.
+ *   1. Check LocalStorage cache → return if fresh (< 60 min).
+ *   2. List 30 commits via Octokit.
+ *   3. Slice top 15 → fetch each individually for file details.
+ *   4. Merge file data back into commit objects.
+ *   5. Cache the enriched array and return it.
+ *   6. On error, return a structured error object.
  *
  * @param {string} owner - Repository owner (e.g. "facebook")
  * @param {string} repo  - Repository name  (e.g. "react")
@@ -112,17 +150,15 @@ export async function fetchRepoCommits(owner, repo) {
     return cached;
   }
 
-  // --- (b) Live API call ---
+  // --- (b) Step A: Fetch the commit list ---
   try {
     const { data } = await octokit.rest.repos.listCommits({
       owner,
       repo,
-      per_page: 50,
+      per_page: 30,
     });
 
-    // Normalise the response to a leaner shape that the UI needs.
-    // We keep the full object so downstream (e.g. Recharts hotspot)
-    // can access nested fields like `files`, `stats`, etc.
+    // Normalise to a leaner shape
     const commits = data.map((item) => ({
       sha: item.sha,
       message: item.commit.message,
@@ -134,18 +170,39 @@ export async function fetchRepoCommits(owner, repo) {
         login: item.author?.login ?? '',
       },
       url: item.html_url,
-      // `files` is only present when fetching a single commit,
-      // so it will be undefined here — the UI should handle that.
-      files: item.files ?? [],
+      files: [],   // placeholder — enriched below
+      stats: null,
     }));
 
-    // --- (c) Persist to cache ---
+    // --- (c) Step B & C: Enrich top 15 with file details ---
+    const toEnrich = commits.slice(0, DETAIL_FETCH_LIMIT);
+
+    console.info(
+      `[GitTrace] Fetching file details for ${toEnrich.length} commits…`,
+    );
+
+    const detailResults = await Promise.allSettled(
+      toEnrich.map((c) => fetchCommitDetail(owner, repo, c.sha)),
+    );
+
+    // --- (d) Step D: Merge detail data back into commits ---
+    detailResults.forEach((result, i) => {
+      if (result.status === 'fulfilled' && result.value) {
+        commits[i].files = result.value.files;
+        commits[i].stats = result.value.stats;
+      }
+    });
+
+    // --- (e) Persist enriched data to cache ---
     writeCache(key, commits);
-    console.info(`[GitTrace] Fetched & cached ${commits.length} commits for ${owner}/${repo}`);
+    console.info(
+      `[GitTrace] Fetched & cached ${commits.length} commits ` +
+      `(${toEnrich.length} enriched) for ${owner}/${repo}`,
+    );
 
     return commits;
   } catch (err) {
-    // --- (d) Error handling ---
+    // --- (f) Error handling ---
     return buildError(err);
   }
 }

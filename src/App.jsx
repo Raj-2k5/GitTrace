@@ -2,21 +2,24 @@
  * GitTrace — App Entry Point
  * ------------------------------------------------------------
  * Wires up the useRepoData hook and renders the repo search bar
- * with the animated Timeline component (now including AI story).
+ * with the animated Timeline, on-demand AI story, and Code
+ * Hotspot treemap visualization.
  * Styled with Tailwind CSS for a dark-mode-first aesthetic.
  * ============================================================ */
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { Search } from 'lucide-react';
 import useRepoData from './hooks/useRepoData';
 import Timeline from './components/timeline/Timeline';
+import HotspotMap from './components/analytics/HotspotMap';
+import { processHotspotData } from './utils/analytics';
 import './index.css';
 
 function App() {
   // Local controlled input state
   const [url, setUrl] = useState('');
 
-  // Hook state + action (now includes AI story state)
+  // Hook state + actions
   const {
     isLoading,
     data,
@@ -25,7 +28,14 @@ function App() {
     isAILoading,
     aiError,
     loadRepo,
+    generateStory,
   } = useRepoData();
+
+  // Process hotspot data from commits (memoised)
+  const hotspotData = useMemo(
+    () => processHotspotData(data),
+    [data],
+  );
 
   /** Handle form submission */
   const handleSubmit = (e) => {
@@ -46,7 +56,7 @@ function App() {
       </header>
 
       {/* ──────────── Search Bar ──────────── */}
-      <main className="max-w-2xl mx-auto px-4 pb-20">
+      <main className="max-w-3xl mx-auto px-4 pb-20">
         <form
           id="repo-search-form"
           onSubmit={handleSubmit}
@@ -83,11 +93,11 @@ function App() {
           </div>
         )}
 
-        {/* ──────────── Mock-mode badge ──────────── */}
-        {data && !isLoading && import.meta.env.VITE_USE_LIVE_API !== 'true' && (
+        {/* ──────────── Commit count badge ──────────── */}
+        {data && !isLoading && (
           <div className="mt-6 mb-2 flex items-center gap-2">
-            <span className="rounded-full bg-yellow-800/40 px-3 py-1 text-xs font-medium text-yellow-300">
-              MOCK DATA
+            <span className="rounded-full bg-emerald-800/40 px-3 py-1 text-xs font-medium text-emerald-300">
+              LIVE DATA
             </span>
             <span className="text-xs text-gray-500">
               {data.length} commit{data.length !== 1 ? 's' : ''} loaded
@@ -95,7 +105,7 @@ function App() {
           </div>
         )}
 
-        {/* ──────────── Timeline (with AI Story) ──────────── */}
+        {/* ──────────── Timeline (with AI Summary) ──────────── */}
         <div className="mt-6">
           <Timeline
             commits={data}
@@ -103,8 +113,16 @@ function App() {
             aiStory={aiStory}
             isAILoading={isAILoading}
             aiError={aiError}
+            onGenerateStory={generateStory}
           />
         </div>
+
+        {/* ──────────── Code Hotspot Treemap ──────────── */}
+        {data && !isLoading && (
+          <div className="mt-8">
+            <HotspotMap data={hotspotData} />
+          </div>
+        )}
       </main>
     </div>
   );

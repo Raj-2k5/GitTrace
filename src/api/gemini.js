@@ -1,15 +1,15 @@
 /* ============================================================
  * GitTrace — Gemini AI Service
  * ------------------------------------------------------------
- * Integrates with the Google Gemini API to generate "Progress
- * Stories" — human-readable sprint summaries derived from raw
- * commit messages.
+ * Integrates with the Google Gemini API via @google/genai SDK
+ * to generate human-readable sprint summaries from commit data.
  *
  * FEATURES:
- *  1. Uses the `gemini-2.5-flash` model for fast, cost-effective
- *     text generation.
+ *  1. Uses the `gemini-2.5-flash` model for fast generation.
  *  2. Enforces structured JSON output via `responseMimeType`.
- *  3. Graceful fallback if the API key is missing or the call
+ *  3. System prompt tuned for a Senior Engineering Manager
+ *     persona producing 2-paragraph sprint updates.
+ *  4. Graceful fallback if the API key is missing or the call
  *     fails — the app continues to work without AI insights.
  *
  * USAGE:
@@ -18,7 +18,7 @@
  *   // → { title, summary, vibe } or { error: true, message }
  * ============================================================ */
 
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 
 // ------------------------------------------------------------
 // 1. Client Initialization
@@ -31,39 +31,43 @@ const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
  * key is configured — the caller should treat this as "AI
  * features unavailable" rather than an error.
  */
-const getModel = () => {
-  if (!API_KEY) {
+let _client = null;
+
+const getClient = () => {
+  if (!API_KEY || API_KEY === 'your_gemini_api_key_here') {
     console.warn(
       '[GitTrace] No VITE_GEMINI_API_KEY found. AI Progress Stories are disabled.',
     );
     return null;
   }
 
-  const genAI = new GoogleGenerativeAI(API_KEY);
-
-  // Use gemini-2.5-flash for speed and cost efficiency
-  return genAI.getGenerativeModel({
-    model: 'gemini-2.5-flash',
-    // Enforce structured JSON output so we can parse reliably
-    generationConfig: {
-      responseMimeType: 'application/json',
-    },
-  });
+  if (!_client) {
+    _client = new GoogleGenAI({ apiKey: API_KEY });
+  }
+  return _client;
 };
 
 // ------------------------------------------------------------
-// 2. Prompt Construction
+// 2. System Prompt & Prompt Construction
 // ------------------------------------------------------------
 
+const SYSTEM_PROMPT = `You are a Senior Engineering Manager. I will provide a list of recent Git commits. Summarize this work into a concise, human-readable 2-paragraph sprint update. Focus on the 'why' and the overall progress, grouping related tasks together. Avoid technical jargon where possible.
+
+Along with the summary, provide:
+- "title": A catchy, short title for this batch of work (max 8 words). Be creative but professional. Examples: "The Performance Push", "Dark Mode & Beyond", "Bug Squash Marathon".
+- "summary": Your 2-paragraph sprint update.
+- "vibe": A single keyword that captures the overall mood of this batch. Pick ONE from: "Feature Shipping", "Bug Squashing", "Refactoring", "Performance", "Testing", "Documentation", "Maintenance", "Infrastructure", "UI Polish", "Security".
+
+Return ONLY a valid JSON object with exactly these three keys: "title", "summary", "vibe".`;
+
 /**
- * Build the system prompt that instructs Gemini to behave as a
- * Tech Lead and return a structured JSON summary.
+ * Build the user prompt containing the commit messages.
  *
  * @param {Array} commits - Array of commit objects.
- * @returns {string} - The full prompt string.
+ * @returns {string} - The user prompt string.
  */
-function buildPrompt(commits) {
-  // Extract only the messages + authors to keep the prompt lean
+function buildUserPrompt(commits) {
+  // Extract just the commit messages (with author for context)
   const commitList = commits
     .map(
       (c, i) =>
@@ -71,19 +75,7 @@ function buildPrompt(commits) {
     )
     .join('\n');
 
-  return `You are a senior Tech Lead reviewing a batch of recent Git commits for a project.
-
-Analyze the following commit messages and produce a concise "Progress Story" — a sprint-style summary that communicates what the team accomplished.
-
-COMMITS:
-${commitList}
-
-INSTRUCTIONS:
-- "title": A catchy, short title for this batch of work (max 8 words). Be creative but professional. Examples: "The Performance Push", "Dark Mode & Beyond", "Bug Squash Marathon".
-- "summary": A 2-3 sentence human-readable summary of what was achieved. Focus on business/project value and developer impact, not individual commits. Write in past tense.
-- "vibe": A single keyword that captures the overall mood of this batch. Pick ONE from: "Feature Shipping", "Bug Squashing", "Refactoring", "Performance", "Testing", "Documentation", "Maintenance", "Infrastructure", "UI Polish", "Security".
-
-Return ONLY a valid JSON object with exactly these three keys: "title", "summary", "vibe".`;
+  return `Here are the recent Git commits to summarize:\n\n${commitList}`;
 }
 
 // ------------------------------------------------------------
@@ -92,7 +84,7 @@ Return ONLY a valid JSON object with exactly these three keys: "title", "summary
 
 /**
  * Generate a structured AI "Progress Story" from an array of
- * commits using Google Gemini.
+ * commits using Google Gemini (@google/genai SDK).
  *
  * @param {Array} commitsArray - Array of commit objects (needs
  *                               at least `.message` and `.author.name`).
@@ -105,10 +97,10 @@ export async function generateCommitSummary(commitsArray) {
     return { error: true, message: 'No commits to summarize.' };
   }
 
-  const model = getModel();
+  const client = getClient();
 
   // Guard: no API key → gracefully skip
-  if (!model) {
+  if (!client) {
     return {
       error: true,
       message: 'Gemini API key not configured. Add VITE_GEMINI_API_KEY to your .env file.',
@@ -116,10 +108,18 @@ export async function generateCommitSummary(commitsArray) {
   }
 
   try {
-    const prompt = buildPrompt(commitsArray);
-    const result = await model.generateContent(prompt);
-    const response = result.response;
-    const text = response.text();
+    const userPrompt = buildUserPrompt(commitsArray);
+
+    const response = await client.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: userPrompt,
+      config: {
+        systemInstruction: SYSTEM_PROMPT,
+        responseMimeType: 'application/json',
+      },
+    });
+
+    const text = response.text;
 
     // Parse the JSON response — Gemini should return valid JSON
     // thanks to responseMimeType, but we wrap in try/catch anyway.
@@ -140,7 +140,7 @@ export async function generateCommitSummary(commitsArray) {
     console.error('[GitTrace] Gemini API error:', err);
 
     // Provide user-friendly error messages
-    if (err.message?.includes('API_KEY')) {
+    if (err.message?.includes('API_KEY') || err.message?.includes('API key')) {
       return {
         error: true,
         message: 'Invalid Gemini API key. Check your VITE_GEMINI_API_KEY.',

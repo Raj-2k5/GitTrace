@@ -3,20 +3,21 @@
  * ------------------------------------------------------------
  * Vertical commit timeline that orchestrates staggered entrance
  * animations for its child CommitNode components, with an
- * AI-generated Progress Story card at the top.
+ * on-demand AI Summary card at the top.
  *
  * PROPS:
- *  commits     — Array of commit objects (from GitHub API or mock).
- *  isLoading   — Whether commit data is being fetched.
- *  aiStory     — { title, summary, vibe } from Gemini (or null).
- *  isAILoading — Whether Gemini is generating the story.
- *  aiError     — Error string from Gemini (or null).
+ *  commits           — Array of commit objects (from GitHub API).
+ *  isLoading         — Whether commit data is being fetched.
+ *  aiStory           — { title, summary, vibe } from Gemini (or null).
+ *  isAILoading       — Whether Gemini is generating the story.
+ *  aiError           — Error string from Gemini (or null).
+ *  onGenerateStory   — Callback to trigger AI story generation.
  * ============================================================ */
 
 import { motion } from 'framer-motion';
 import { GitBranch, Loader2 } from 'lucide-react';
 import CommitNode from './CommitNode';
-import AIStoryCard from './AIStoryCard';
+import AISummaryCard from './AISummaryCard';
 
 // ------------------------------------------------------------
 // 1. Container Animation Variants
@@ -43,6 +44,7 @@ export default function Timeline({
   aiStory = null,
   isAILoading = false,
   aiError = null,
+  onGenerateStory,
 }) {
   // ── Loading state (commit fetch) ──
   if (isLoading) {
@@ -69,7 +71,7 @@ export default function Timeline({
     );
   }
 
-  // ── Timeline with AI Story at top ──
+  // ── Timeline with AI Summary Card at top ──
   return (
     <motion.div
       variants={containerVariant}
@@ -77,17 +79,19 @@ export default function Timeline({
       animate="visible"
       className="relative"
     >
+      {/* AI Summary Card — rendered above all commits */}
+      <AISummaryCard
+        story={aiStory}
+        isLoading={isAILoading}
+        error={aiError}
+        onGenerateStory={onGenerateStory}
+        hasCommits={commits.length > 0}
+      />
+
       {/* Vertical tracking line */}
       <div
         aria-hidden="true"
         className="absolute left-[19px] top-0 bottom-0 w-px bg-gradient-to-b from-purple-500/30 via-emerald-500/20 to-transparent"
-      />
-
-      {/* AI Story Card — rendered first, above all commits */}
-      <AIStoryCard
-        story={aiStory}
-        isLoading={isAILoading}
-        error={aiError}
       />
 
       {/* Commit nodes */}

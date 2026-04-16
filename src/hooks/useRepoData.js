@@ -1,8 +1,8 @@
 /* ============================================================
  * GitTrace — useRepoData Custom Hook
  * ------------------------------------------------------------
- * Central state-management hook for fetching and storing GitHub
- * repository commit data AND AI-generated progress stories.
+ * Central state-management hook for fetching GitHub repository
+ * commit data AND AI-generated progress stories.
  *
  * STATE:
  *   isLoading   — true while commits are being fetched.
@@ -12,20 +12,18 @@
  *   isAILoading — true while Gemini is generating a story.
  *   aiError     — error string from Gemini (or null).
  *
- * EXPOSED ACTION:
- *   loadRepo(url) — accepts a GitHub URL (or owner/repo string),
- *                    parses it, fetches commits, then triggers
- *                    AI story generation in parallel.
+ * EXPOSED ACTIONS:
+ *   loadRepo(url)    — accepts a GitHub URL (or owner/repo string),
+ *                       parses it, fetches live commits.
+ *   generateStory()  — triggers Gemini AI story generation using
+ *                       the currently loaded commits (on demand).
  *
- * DATA SOURCE TOGGLE:
- *   • VITE_USE_LIVE_API=true  → calls the real GitHub API.
- *   • VITE_USE_LIVE_API=false → returns local mock data.
+ * NO MOCK DATA — always hits the live GitHub API.
  * ============================================================ */
 
 import { useState, useCallback } from 'react';
 import { fetchRepoCommits } from '../api/github';
 import { generateCommitSummary } from '../api/gemini';
-import MOCK_COMMITS from '../utils/mockData';
 
 // ------------------------------------------------------------
 // 1. URL Parsing Utility
@@ -79,19 +77,12 @@ export function parseGitHubInput(input) {
 }
 
 // ------------------------------------------------------------
-// 2. Live-API Toggle
-// ------------------------------------------------------------
-
-/** Whether to hit the real GitHub API or use mock data. */
-const USE_LIVE_API = import.meta.env.VITE_USE_LIVE_API === 'true';
-
-// ------------------------------------------------------------
-// 3. Hook Definition
+// 2. Hook Definition
 // ------------------------------------------------------------
 
 /**
- * Custom React hook that manages repo-commit state and triggers
- * AI story generation after commits are loaded.
+ * Custom React hook that manages repo-commit state and exposes
+ * an on-demand AI story generation action.
  */
 export default function useRepoData() {
   // Commit data state
@@ -105,20 +96,20 @@ export default function useRepoData() {
   const [aiError, setAiError] = useState(null);
 
   /**
-   * Fire-and-forget AI story generation.
-   * This runs independently from the commit fetch so the timeline
-   * can render immediately while the AI card shows a skeleton.
-   *
-   * @param {Array} commits - The commit array to summarise.
+   * On-demand AI story generation.
+   * Triggered when the user clicks "Generate AI Story".
+   * Uses the currently loaded commits (the latest 10).
    */
-  const triggerAISummary = useCallback(async (commits) => {
+  const generateStory = useCallback(async () => {
+    if (!data || data.length === 0) return;
+
     setIsAILoading(true);
     setAiStory(null);
     setAiError(null);
 
     try {
       // Send the latest batch (first 10 commits) to Gemini
-      const batch = commits.slice(0, 10);
+      const batch = data.slice(0, 10);
       const result = await generateCommitSummary(batch);
 
       if (result?.error) {
@@ -131,11 +122,11 @@ export default function useRepoData() {
     } finally {
       setIsAILoading(false);
     }
-  }, []);
+  }, [data]);
 
   /**
-   * Parse a GitHub URL, fetch (or mock) commits, then kick off
-   * AI story generation.
+   * Parse a GitHub URL, fetch live commits from the GitHub API.
+   * No mock data fallback — always hits the live endpoint.
    *
    * @param {string} url - Any supported GitHub input format.
    */
@@ -160,42 +151,24 @@ export default function useRepoData() {
 
     const { owner, repo } = parsed;
 
-    // --- Step 2: Fetch commits ---
-    let commits = null;
-
-    if (!USE_LIVE_API) {
-      // Simulate a small network delay for realistic UX
-      await new Promise((r) => setTimeout(r, 400));
-      console.info(
-        `[GitTrace] Mock mode — returning ${MOCK_COMMITS.length} mock commits ` +
-        `(requested: ${owner}/${repo})`,
-      );
-      commits = MOCK_COMMITS;
-    } else {
-      try {
-        const result = await fetchRepoCommits(owner, repo);
-        if (result?.error) {
-          setError(result.message);
-          setIsLoading(false);
-          return;
-        }
-        commits = result;
-      } catch (err) {
-        setError(err.message || 'An unexpected error occurred.');
+    // --- Step 2: Fetch live commits ---
+    try {
+      const result = await fetchRepoCommits(owner, repo);
+      if (result?.error) {
+        setError(result.message);
         setIsLoading(false);
         return;
       }
+      setData(result);
+    } catch (err) {
+      setError(err.message || 'An unexpected error occurred.');
+      setIsLoading(false);
+      return;
     }
 
-    // --- Step 3: Update commit state ---
-    setData(commits);
     setIsLoading(false);
-
-    // --- Step 4: Trigger AI story in background ---
-    // This runs independently — the timeline renders immediately
-    // while the AI card shows a skeleton loader.
-    triggerAISummary(commits);
-  }, [triggerAISummary]);
+    // AI story is NOT auto-triggered — user clicks the button.
+  }, []);
 
   return {
     isLoading,
@@ -205,5 +178,6 @@ export default function useRepoData() {
     isAILoading,
     aiError,
     loadRepo,
+    generateStory,
   };
 }
