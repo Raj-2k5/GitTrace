@@ -1,311 +1,361 @@
 /* ============================================================
- * GitTrace — HotspotMap Component
+ * GitTrace — HotspotMap Component (Redesigned)
  * ------------------------------------------------------------
- * A Recharts Treemap visualization showing the most frequently
- * modified files across the commit history — a "Code Hotspot"
- * or "Technical Debt Radar".
+ * Custom DOM-based treemap replacing Recharts <Treemap>.
  *
  * FEATURES:
- *  • Dynamic heat-scale coloring: hot files → rose/orange,
- *    cold files → teal/slate.
- *  • Custom tooltip with filename, total changes, and commit count.
- *  • Custom treemap cells with truncated filenames + change count.
- *  • Responsive via ResponsiveContainer with strict parent height.
- *  • Graceful empty state when no file data is available.
- *  • Framer Motion entrance animation.
- *
- * PROPS:
- *  data — Flat array from processHotspotData():
- *         [{ name, size, commits }, ...]
+ *  • Squarified treemap algorithm (pure JS)
+ *  • 40% max area cap per tile (prevents one file drowning chart)
+ *  • 5-stop color scale (navy→green→amber→orange→crimson)
+ *  • Gradient scrim labels with JetBrains Mono
+ *  • Min 72×40px to show label, hover-only tooltip for small tiles
+ *  • 2px gap between tiles
+ *  • Rich tooltip with full path, changes, %, last modified
+ *  • Full-width legend gradient bar
+ *  • Footer stats with clickable hottest file
  * ============================================================ */
 
-import { useMemo } from 'react';
-import { Treemap, ResponsiveContainer, Tooltip } from 'recharts';
-import { motion } from 'framer-motion';
-import { Flame, FileCode2, FolderOpen } from 'lucide-react';
+import { useState, useMemo, useRef, useCallback } from 'react';
+import { formatNumber } from '../../utils/analytics';
 
-// ------------------------------------------------------------
-// 1. Color Scale
-// ------------------------------------------------------------
+// ── Color Scale (5 stops) ──
+const COLOR_STOPS = ['#0F3460', '#16653A', '#7C4F00', '#8B2500', '#6B0000'];
 
-function lerpColor(color1, color2, t) {
-  const c1 = parseInt(color1.slice(1), 16);
-  const c2 = parseInt(color2.slice(1), 16);
+function getTreemapColor(value, maxValue) {
+  if (maxValue <= 0) return COLOR_STOPS[0];
+  const t = Math.min(value / maxValue, 1);
+  const idx = Math.min(Math.floor(t * (COLOR_STOPS.length - 1)), COLOR_STOPS.length - 2);
+  const frac = (t * (COLOR_STOPS.length - 1)) - idx;
 
-  const r1 = (c1 >> 16) & 0xff, g1 = (c1 >> 8) & 0xff, b1 = c1 & 0xff;
-  const r2 = (c2 >> 16) & 0xff, g2 = (c2 >> 8) & 0xff, b2 = c2 & 0xff;
-
-  const r = Math.round(r1 + (r2 - r1) * t);
-  const g = Math.round(g1 + (g2 - g1) * t);
-  const b = Math.round(b1 + (b2 - b1) * t);
-
-  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+  const c1 = hexToRgb(COLOR_STOPS[idx]);
+  const c2 = hexToRgb(COLOR_STOPS[idx + 1]);
+  return `rgb(${lerp(c1.r, c2.r, frac)}, ${lerp(c1.g, c2.g, frac)}, ${lerp(c1.b, c2.b, frac)})`;
 }
 
-const COLD_COLOR = '#134e4a';
-const MID_COLOR  = '#c2410c';
-const HOT_COLOR  = '#e11d48';
-
-function heatColor(t) {
-  const clamped = Math.max(0, Math.min(1, t));
-  if (clamped <= 0.5) return lerpColor(COLD_COLOR, MID_COLOR, clamped * 2);
-  return lerpColor(MID_COLOR, HOT_COLOR, (clamped - 0.5) * 2);
+function hexToRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff };
 }
 
-// ------------------------------------------------------------
-// 2. Custom Treemap Cell
-// ------------------------------------------------------------
+function lerp(a, b, t) { return Math.round(a + (b - a) * t); }
 
-/**
- * Custom <content> renderer for each treemap cell.
- *
- * NOTE: Recharts renders this as a render-element, NOT a standard
- * React component — React hooks MUST NOT be used here.
- */
-function CustomCell(props) {
-  const { x, y, width, height, name, size, maxSize } = props;
+// ── Squarified Treemap Layout ──
+function squarify(data, x, y, w, h) {
+  if (data.length === 0 || w <= 0 || h <= 0) return [];
 
-  // Safety: coerce every numeric prop through Number.isFinite
-  const px = Number.isFinite(x)      ? x      : 0;
-  const py = Number.isFinite(y)      ? y      : 0;
-  const w  = Number.isFinite(width)  ? width  : 0;
-  const h  = Number.isFinite(height) ? height : 0;
-  const s  = Number.isFinite(size)   ? size   : 0;
+  const total = data.reduce((s, d) => s + d.cappedSize, 0);
+  if (total <= 0) return [];
 
-  if (w <= 0 || h <= 0) return null;
+  const rects = [];
+  let remaining = [...data];
+  let cx = x, cy = y, cw = w, ch = h;
 
-  const showLabel = w > 50 && h > 30;
-  const showSize  = w > 60 && h > 44;
+  while (remaining.length > 0) {
+    const isHorizontal = cw >= ch;
+    const sideLen = isHorizontal ? ch : cw;
 
-  const t = maxSize > 0 ? s / maxSize : 0;
-  const fill = heatColor(t);
+    // Find best row
+    let row = [remaining[0]];
+    let rowArea = remaining[0].cappedSize;
+    let bestRatio = worstRatio(row, rowArea, total, sideLen, isHorizontal ? cw : ch);
 
-  // Truncate filenames (plain computation — no hooks)
-  let displayName = '';
-  if (name) {
-    if (w < 90) {
-      const parts = name.split('/');
-      displayName = parts[parts.length - 1];
-    } else {
-      const maxChars = Math.floor(w / 7);
-      displayName = name.length > maxChars ? '…' + name.slice(-(maxChars - 1)) : name;
+    for (let i = 1; i < remaining.length; i++) {
+      const testRow = [...row, remaining[i]];
+      const testArea = rowArea + remaining[i].cappedSize;
+      const testRatio = worstRatio(testRow, testArea, total, sideLen, isHorizontal ? cw : ch);
+
+      if (testRatio <= bestRatio) {
+        row = testRow;
+        rowArea = testArea;
+        bestRatio = testRatio;
+      } else {
+        break;
+      }
     }
+
+    // Lay out row
+    const rowFrac = rowArea / total;
+    const rowLen = isHorizontal
+      ? cw * rowFrac
+      : ch * rowFrac;
+
+    let offset = 0;
+    for (const item of row) {
+      const itemFrac = item.cappedSize / rowArea;
+      const itemLen = sideLen * itemFrac;
+
+      if (isHorizontal) {
+        rects.push({
+          ...item,
+          x: cx,
+          y: cy + offset,
+          w: Math.max(0, rowLen - 2),
+          h: Math.max(0, itemLen - 2),
+        });
+      } else {
+        rects.push({
+          ...item,
+          x: cx + offset,
+          y: cy,
+          w: Math.max(0, itemLen - 2),
+          h: Math.max(0, rowLen - 2),
+        });
+      }
+      offset += itemLen;
+    }
+
+    // Update remaining area
+    if (isHorizontal) {
+      cx += rowLen;
+      cw -= rowLen;
+    } else {
+      cy += rowLen;
+      ch -= rowLen;
+    }
+
+    remaining = remaining.slice(row.length);
+    // Recalculate total for remaining items
+    // (not needed since we use absolute fractions, but let's be safe)
   }
 
-  return (
-    <g>
-      <rect
-        x={px}
-        y={py}
-        width={w}
-        height={h}
-        rx={4}
-        ry={4}
-        fill={fill}
-        stroke="#111827"
-        strokeWidth={2}
-        style={{
-          transition: 'fill 0.3s ease, opacity 0.2s ease',
-          cursor: 'pointer',
-        }}
-        opacity={0.9}
-        onMouseOver={(e) => { e.currentTarget.style.opacity = '1'; }}
-        onMouseOut={(e) => { e.currentTarget.style.opacity = '0.9'; }}
-      />
-      {showLabel && (
-        <text
-          x={px + w / 2}
-          y={py + h / 2 - (showSize ? 6 : 0)}
-          textAnchor="middle"
-          dominantBaseline="central"
-          fill="#f9fafb"
-          fontSize={w < 100 ? 10 : 11}
-          fontFamily="'Inter', system-ui, sans-serif"
-          fontWeight={500}
-          style={{ pointerEvents: 'none' }}
-        >
-          {displayName}
-        </text>
-      )}
-      {showSize && (
-        <text
-          x={px + w / 2}
-          y={py + h / 2 + 12}
-          textAnchor="middle"
-          dominantBaseline="central"
-          fill="#d1d5db"
-          fontSize={9}
-          fontFamily="'Inter', system-ui, sans-serif"
-          fontWeight={400}
-          style={{ pointerEvents: 'none', opacity: 0.75 }}
-        >
-          {s.toLocaleString()} changes
-        </text>
-      )}
-    </g>
-  );
+  return rects;
 }
 
-// ------------------------------------------------------------
-// 3. Custom Tooltip
-// ------------------------------------------------------------
+function worstRatio(row, rowArea, totalArea, sideLen, fullLen) {
+  if (rowArea <= 0 || totalArea <= 0 || sideLen <= 0 || fullLen <= 0) return Infinity;
+  const rowLen = fullLen * (rowArea / totalArea);
+  if (rowLen <= 0) return Infinity;
 
-function HotspotTooltip({ active, payload }) {
-  if (!active || !payload || payload.length === 0) return null;
+  let worst = 0;
+  for (const item of row) {
+    const frac = item.cappedSize / rowArea;
+    const itemLen = sideLen * frac;
+    if (itemLen <= 0 || rowLen <= 0) continue;
+    const r = Math.max(rowLen / itemLen, itemLen / rowLen);
+    if (r > worst) worst = r;
+  }
+  return worst;
+}
 
-  const item = payload[0]?.payload;
-  if (!item) return null;
+// ── Tile Component ──
+function TreemapTile({ rect, maxSize, totalChanges, onHover, onLeave }) {
+  const showLabel = rect.w >= 72 && rect.h >= 40;
+  const color = getTreemapColor(rect.size, maxSize);
+  const isCapped = rect.capped;
 
   return (
-    <div className="rounded-xl border border-gray-700 bg-gray-900/95 backdrop-blur-lg px-4 py-3 shadow-2xl max-w-xs">
-      <div className="flex items-center gap-2 mb-1.5">
-        <FileCode2 className="h-3.5 w-3.5 text-orange-400 flex-shrink-0" />
-        <span className="text-xs font-semibold text-gray-100 break-all leading-tight">
-          {item.name}
-        </span>
-      </div>
-      <div className="flex items-center gap-4 text-[11px] text-gray-400">
-        <span>
-          <span className="font-semibold text-orange-300">{item.size?.toLocaleString()}</span> total changes
-        </span>
-        <span>
-          <span className="font-semibold text-emerald-300">{item.commits}</span> commit{item.commits !== 1 ? 's' : ''}
-        </span>
-      </div>
+    <div
+      className="treemap__tile"
+      style={{
+        position: 'absolute',
+        left: `${rect.x}px`,
+        top: `${rect.y}px`,
+        width: `${rect.w}px`,
+        height: `${rect.h}px`,
+        background: color,
+      }}
+      onMouseEnter={(e) => onHover(e, rect)}
+      onMouseLeave={onLeave}
+    >
+      {showLabel && (
+        <>
+          <div className="treemap__tile-scrim" />
+          <div className="treemap__tile-label">
+            <span className="treemap__tile-name">
+              {rect.name.split('/').pop()}
+            </span>
+            <span className="treemap__tile-changes">
+              {formatNumber(rect.size)} changes{isCapped ? ' (capped)' : ''}
+            </span>
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
-// ------------------------------------------------------------
-// 4. Container Animation
-// ------------------------------------------------------------
-
-const cardVariant = {
-  hidden: { opacity: 0, y: 20 },
-  visible: {
-    opacity: 1,
-    y: 0,
-    transition: { type: 'spring', stiffness: 80, damping: 16, delay: 0.2 },
-  },
-};
-
-// ------------------------------------------------------------
-// 5. Main Component
-// ------------------------------------------------------------
-
+// ── Main Component ──
 export default function HotspotMap({ data }) {
-  // Find the max size for color normalization
-  const maxSize = useMemo(() => {
-    if (!data || data.length === 0) return 0;
-    return data[0].size; // already sorted descending
+  const containerRef = useRef(null);
+  const [tooltip, setTooltip] = useState(null);
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+
+  // Observe container size
+  const measuredRef = useCallback((node) => {
+    if (node) {
+      containerRef.current = node;
+      const ro = new ResizeObserver(entries => {
+        for (const entry of entries) {
+          setContainerSize({
+            width: entry.contentRect.width,
+            height: Math.max(entry.contentRect.height, 220),
+          });
+        }
+      });
+      ro.observe(node);
+      // Initial measurement
+      setContainerSize({
+        width: node.offsetWidth,
+        height: Math.max(node.offsetHeight, 220),
+      });
+    }
+  }, []);
+
+  // Process data with 40% area cap
+  const { tiles, totalChanges, maxSize } = useMemo(() => {
+    if (!data || data.length === 0) return { tiles: [], totalChanges: 0, maxSize: 0 };
+
+    const total = data.reduce((s, d) => s + d.size, 0);
+    const maxAllowed = total * 0.4;
+    const maxRaw = data[0]?.size || 0;
+
+    const processed = data.map(d => ({
+      ...d,
+      cappedSize: Math.min(d.size, maxAllowed),
+      capped: d.size > maxAllowed,
+    }));
+
+    return {
+      tiles: processed,
+      totalChanges: total,
+      maxSize: maxRaw,
+    };
   }, [data]);
 
-  // Inject maxSize into each data item so CustomCell can access it
-  const enrichedData = useMemo(() => {
-    if (!data) return [];
-    return data.map((d) => ({ ...d, maxSize }));
-  }, [data, maxSize]);
+  // Compute layout
+  const rects = useMemo(() => {
+    if (tiles.length === 0 || containerSize.width <= 0) return [];
+    return squarify(tiles, 0, 0, containerSize.width, containerSize.height);
+  }, [tiles, containerSize]);
 
-  // ── Guard: empty / no data ──
+  // Tooltip handlers
+  const handleHover = useCallback((e, rect) => {
+    const pct = totalChanges > 0 ? ((rect.size / totalChanges) * 100).toFixed(1) : '0';
+    setTooltip({
+      x: e.clientX + 12,
+      y: e.clientY - 10,
+      name: rect.name,
+      changes: rect.size,
+      pct,
+      lastSha: rect.lastSha,
+      lastDate: rect.lastDate,
+    });
+  }, [totalChanges]);
+
+  const handleMouseMove = useCallback((e) => {
+    if (tooltip) {
+      setTooltip(prev => prev ? { ...prev, x: e.clientX + 12, y: e.clientY - 10 } : null);
+    }
+  }, [tooltip]);
+
+  const handleLeave = useCallback(() => {
+    setTooltip(null);
+  }, []);
+
+  // ── Empty state ──
   if (!data || data.length === 0) {
     return (
-      <motion.div
-        variants={cardVariant}
-        initial="hidden"
-        animate="visible"
-        className="rounded-2xl border border-gray-800 bg-gray-900/50 p-8"
-      >
-        <div className="flex items-center gap-3 mb-6">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-orange-600/15 border border-orange-800/30">
-            <Flame className="h-4 w-4 text-orange-400" />
-          </div>
-          <div>
-            <h2 className="text-sm font-semibold text-gray-200">Code Hotspots</h2>
-            <p className="text-[11px] text-gray-500">Technical Debt Radar</p>
+      <div className="heatmap-card">
+        <div className="heatmap-card__header">
+          <svg className="heatmap-card__flame" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>
+          </svg>
+          <div className="heatmap-card__titles">
+            <div className="heatmap-card__title">Code hotspots</div>
+            <div className="heatmap-card__subtitle">Technical debt radar</div>
           </div>
         </div>
-        <div className="flex h-80 flex-col items-center justify-center text-gray-500">
-          <div className="flex h-14 w-14 items-center justify-center rounded-full border border-gray-800 bg-gray-900/60 mb-3">
-            <FolderOpen className="h-6 w-6 text-gray-600" />
-          </div>
-          <p className="text-sm font-medium text-gray-400">No hotspot data available</p>
-          <p className="text-xs text-gray-600 mt-1 text-center max-w-[280px]">
-            File-level change details are not available for these commits.
-            This typically happens with the list-commits endpoint.
-          </p>
+        <div style={{ height: '220px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
+          No hotspot data available
         </div>
-      </motion.div>
+      </div>
     );
   }
 
   // ── Treemap with data ──
   return (
-    <motion.div
-      variants={cardVariant}
-      initial="hidden"
-      animate="visible"
-      className="rounded-2xl border border-gray-800 bg-gray-900/50 p-6"
-    >
-      {/* Card Header */}
-      <div className="flex items-center gap-3 mb-1">
-        <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-orange-600/15 border border-orange-800/30">
-          <Flame className="h-4 w-4 text-orange-400" />
+    <div className="heatmap-card">
+      {/* Header */}
+      <div className="heatmap-card__header">
+        <svg className="heatmap-card__flame" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>
+        </svg>
+        <div className="heatmap-card__titles">
+          <div className="heatmap-card__title">Code hotspots</div>
+          <div className="heatmap-card__subtitle">Technical debt radar</div>
         </div>
-        <div>
-          <h2 className="text-sm font-semibold text-gray-200">Code Hotspots</h2>
-          <p className="text-[11px] text-gray-500">Technical Debt Radar</p>
-        </div>
-        <div className="flex-1" />
-        <span className="text-[10px] text-gray-600 font-medium">
+        <span className="heatmap-card__badge">
           Top {data.length} files by change volume
         </span>
       </div>
 
+      {/* Treemap */}
+      <div
+        ref={measuredRef}
+        className="treemap"
+        style={{ position: 'relative', height: '260px', flexWrap: 'initial', gap: 0 }}
+        onMouseMove={handleMouseMove}
+      >
+        {rects.map((rect) => (
+          <TreemapTile
+            key={rect.name}
+            rect={rect}
+            maxSize={maxSize}
+            totalChanges={totalChanges}
+            onHover={handleHover}
+            onLeave={handleLeave}
+          />
+        ))}
+      </div>
+
+      {/* Tooltip (portal-style fixed position) */}
+      {tooltip && (
+        <div
+          className="treemap-tooltip"
+          style={{ left: `${tooltip.x}px`, top: `${tooltip.y}px` }}
+        >
+          <div className="treemap-tooltip__filename">{tooltip.name}</div>
+          <div className="treemap-tooltip__row">
+            <span>Total changes</span>
+            <span className="treemap-tooltip__value">{formatNumber(tooltip.changes)}</span>
+          </div>
+          <div className="treemap-tooltip__row">
+            <span>% of all changes</span>
+            <span className="treemap-tooltip__value">{tooltip.pct}%</span>
+          </div>
+          {tooltip.lastSha && (
+            <div className="treemap-tooltip__row">
+              <span>Last modified</span>
+              <span className="treemap-tooltip__value" style={{ fontFamily: 'var(--font-mono)', fontSize: '10px' }}>
+                {tooltip.lastSha.slice(0, 7)}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Legend */}
-      <div className="flex items-center gap-2 mb-4 mt-3 ml-12">
-        <span className="text-[10px] text-gray-500">Cool</span>
-        <div className="h-2 w-24 rounded-full" style={{
-          background: `linear-gradient(to right, ${COLD_COLOR}, ${MID_COLOR}, ${HOT_COLOR})`,
-        }} />
-        <span className="text-[10px] text-gray-500">Hot</span>
-      </div>
-
-      {/* Treemap — strict h-80 on parent prevents ResponsiveContainer collapse → NaN */}
-      <div className="w-full h-80 min-h-[300px]">
-        <ResponsiveContainer width="100%" height="100%">
-          <Treemap
-            data={enrichedData}
-            dataKey="size"
-            nameKey="name"
-            stroke="#111827"
-            animationDuration={600}
-            animationEasing="ease-out"
-            content={<CustomCell />}
-            isAnimationActive={false}
-          >
-            <Tooltip
-              content={<HotspotTooltip />}
-              cursor={false}
-              wrapperStyle={{ outline: 'none' }}
-            />
-          </Treemap>
-        </ResponsiveContainer>
-      </div>
-
-      {/* Footer stats */}
-      <div className="flex items-center gap-4 mt-4 pt-3 border-t border-gray-800/60">
-        <div className="flex items-center gap-1.5 text-[11px] text-gray-500">
-          <FileCode2 className="h-3 w-3" />
-          <span><span className="font-semibold text-gray-400">{data.length}</span> files tracked</span>
+      <div className="heatmap-legend">
+        <div className="heatmap-legend__bar" />
+        <div className="heatmap-legend__labels">
+          <span>Fewer changes</span>
+          <span>More changes</span>
         </div>
-        <div className="flex items-center gap-1.5 text-[11px] text-gray-500">
-          <Flame className="h-3 w-3 text-orange-500/60" />
-          <span>
-            Hottest: <span className="font-semibold text-orange-300">{data[0]?.name?.split('/').pop()}</span>
-            <span className="text-gray-600"> ({data[0]?.size?.toLocaleString()} changes)</span>
+      </div>
+
+      {/* Footer */}
+      <div className="heatmap-footer">
+        <span>📁 {data.length} files tracked</span>
+        <div className="heatmap-footer__divider" />
+        <span>
+          🔥 Hottest:{' '}
+          <span className="heatmap-footer__hottest">
+            {data[0]?.name?.split('/').pop()}
           </span>
-        </div>
+          {' — '}
+          {formatNumber(data[0]?.size)} changes
+        </span>
       </div>
-    </motion.div>
+    </div>
   );
 }
