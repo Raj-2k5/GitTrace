@@ -6,6 +6,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="GitTrace — Visualize commit history, code hotspots, and contributor activity for any public GitHub repository." />
     <title>GitTrace — GitHub Repository Analyzer</title>
+    <!-- Open Graph defaults (overridden dynamically by react-helmet-async) -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="GitTrace — GitHub Repository Analyzer" />
+    <meta property="og:description" content="Visualize commit history, code hotspots, and contributor activity for any GitHub repository." />
+    <meta property="og:site_name" content="GitTrace" />
     <!-- Google Fonts: Inter (UI) + JetBrains Mono (code) -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -13,6 +18,15 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
+    <!-- highlight.js for inline diff syntax highlighting -->
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css"
+    />
+    <script
+      src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"
+      defer
+    ></script>
   </head>
   <body>
     <div id="root"></div>

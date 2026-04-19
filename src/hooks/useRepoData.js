@@ -23,7 +23,7 @@
  * ============================================================ */
 
 import { useState, useCallback } from 'react';
-import { fetchRepoCommits } from '../api/github';
+import { fetchRepoCommits, fetchRepoInfoObj } from '../api/github';
 import { generateCommitSummary } from '../api/gemini';
 
 // ------------------------------------------------------------
@@ -128,12 +128,6 @@ export default function useRepoData() {
     }
   }, [data]);
 
-  /**
-   * Parse a GitHub URL, fetch live commits from the GitHub API.
-   * No mock data fallback — always hits the live endpoint.
-   *
-   * @param {string} url - Any supported GitHub input format.
-   */
   const loadRepo = useCallback(async (url) => {
     // Reset all state
     setIsLoading(true);
@@ -155,17 +149,28 @@ export default function useRepoData() {
     }
 
     const { owner, repo } = parsed;
-    setRepoInfo({ owner, repo });
 
-    // --- Step 2: Fetch live commits ---
+    // --- Step 2: Fetch live commits and metadata ---
     try {
-      const result = await fetchRepoCommits(owner, repo);
-      if (result?.error) {
-        setError(result.message);
+      const [commitsResult, infoResult] = await Promise.all([
+        fetchRepoCommits(owner, repo),
+        fetchRepoInfoObj(owner, repo)
+      ]);
+
+      if (commitsResult?.error) {
+        setError(commitsResult.message);
         setIsLoading(false);
         return;
       }
-      setData(result);
+      
+      // Update repoInfo with fetched details, e.g. private true/false flag
+      setRepoInfo({ 
+        owner, 
+        repo, 
+        private: infoResult?.private || false 
+      });
+      
+      setData(commitsResult);
     } catch (err) {
       setError(err.message || 'An unexpected error occurred.');
       setIsLoading(false);

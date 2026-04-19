@@ -1,16 +1,19 @@
 /* ============================================================
- * GitTrace — Timeline Component (Redesigned)
+ * GitTrace — Timeline Component (v3)
  * ------------------------------------------------------------
  * Vertical commit timeline with:
  *  • Activity sparkline (daily commit bars)
+ *  • Filter bar (search, author, date, size)
  *  • Month grouping with collapsible headers
  *  • Gradient vertical line (mint→violet)
+ *  • Inline diff viewer (accordion, one at a time)
  *  • Pagination (max 20 commits per page)
  *  • Internal scrolling (panel-level, not page-level)
  * ============================================================ */
 
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import CommitNode from './CommitNode';
+import FilterBar from './FilterBar';
 import {
   computeSparklineData,
   groupCommitsByMonth,
@@ -48,7 +51,7 @@ function ActivitySparkline({ commits }) {
 }
 
 // ── Month Group sub-component ──
-function MonthGroup({ group, repoInfo }) {
+function MonthGroup({ group, repoInfo, expandedSha, onToggleDiff }) {
   const [collapsed, setCollapsed] = useState(false);
   const contentRef = useRef(null);
 
@@ -76,7 +79,14 @@ function MonthGroup({ group, repoInfo }) {
         }}
       >
         {group.commits.map((commit) => (
-          <CommitNode key={commit.sha} commit={commit} repoInfo={repoInfo} />
+          <CommitNode
+            key={commit.sha}
+            commit={commit}
+            repoInfo={repoInfo}
+            isExpanded={expandedSha === commit.sha}
+            onToggleDiff={onToggleDiff}
+            dimmed={commit._dimmed}
+          />
         ))}
       </div>
     </div>
@@ -86,19 +96,47 @@ function MonthGroup({ group, repoInfo }) {
 // ── Main Timeline Component ──
 export default function Timeline({ commits = [], isLoading = false, repoInfo = null }) {
   const [page, setPage] = useState(0);
+  const [expandedSha, setExpandedSha] = useState(null);
+  const [filteredCommits, setFilteredCommits] = useState(null);
+  const [isFiltered, setIsFiltered] = useState(false);
   const timelineRef = useRef(null);
 
   // Reset page when commits change
   useEffect(() => {
     setPage(0);
+    setExpandedSha(null);
   }, [commits]);
 
+  // Toggle diff — only one open at a time
+  const handleToggleDiff = useCallback((sha) => {
+    setExpandedSha(prev => prev === sha ? null : sha);
+  }, []);
+
+  // Filter callback
+  const handleFilteredCommits = useCallback((filtered, active) => {
+    setFilteredCommits(filtered);
+    setIsFiltered(active);
+    setPage(0);
+  }, []);
+
+  // Determine which commits to display
+  const displayCommits = useMemo(() => {
+    if (!isFiltered || !filteredCommits) return commits;
+
+    // Mark non-matching as dimmed instead of hiding
+    const filteredSet = new Set(filteredCommits.map(c => c.sha));
+    return commits.map(c => ({
+      ...c,
+      _dimmed: !filteredSet.has(c.sha),
+    }));
+  }, [commits, filteredCommits, isFiltered]);
+
   // Pagination
-  const totalCommits = commits.length;
+  const totalCommits = displayCommits.length;
   const totalPages = Math.ceil(totalCommits / COMMITS_PER_PAGE);
   const startIdx = page * COMMITS_PER_PAGE;
   const endIdx = Math.min(startIdx + COMMITS_PER_PAGE, totalCommits);
-  const pageCommits = commits.slice(startIdx, endIdx);
+  const pageCommits = displayCommits.slice(startIdx, endIdx);
 
   // Group by month
   const monthGroups = useMemo(
@@ -139,10 +177,18 @@ export default function Timeline({ commits = [], isLoading = false, repoInfo = n
   // ── Empty state (handled by App.jsx — Timeline only renders with data) ──
   if (!commits || commits.length === 0) return null;
 
+  const matchCount = isFiltered ? filteredCommits?.length ?? 0 : null;
+
   return (
     <>
       {/* Sparkline — above the scroll area */}
       <ActivitySparkline commits={commits} />
+
+      {/* Filter bar */}
+      <FilterBar
+        commits={commits}
+        onFilteredCommits={handleFilteredCommits}
+      />
 
       {/* Scrollable timeline area */}
       <div className="timeline" ref={timelineRef}>
@@ -157,7 +203,13 @@ export default function Timeline({ commits = [], isLoading = false, repoInfo = n
 
         {/* Month groups */}
         {monthGroups.map((group) => (
-          <MonthGroup key={group.month} group={group} repoInfo={repoInfo} />
+          <MonthGroup
+            key={group.month}
+            group={group}
+            repoInfo={repoInfo}
+            expandedSha={expandedSha}
+            onToggleDiff={handleToggleDiff}
+          />
         ))}
       </div>
 

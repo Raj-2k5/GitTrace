@@ -1,5 +1,5 @@
 /* ============================================================
- * GitTrace — CommitNode Component (v2)
+ * GitTrace — CommitNode Component (v3)
  * ------------------------------------------------------------
  * Features:
  *  • Heat-encoded 3px left border
@@ -8,9 +8,13 @@
  *  • Ghost "↗ GitHub" button on card hover
  *  • Copy-to-clipboard on hash pill (secondary click)
  *  • Zero-value hiding, comma formatting, message clamp
+ *  • Inline diff viewer (accordion expand/collapse)
+ *  • Chevron rotation indicator for expanded state
+ *  • Dimmed state for non-matching filter results
  * ============================================================ */
 
 import { formatNumber, stringToColor, getInitials, getHeatColor } from '../../utils/analytics';
+import DiffViewer from './DiffViewer';
 
 // ── Date formatter ──
 const formatDate = (iso) => {
@@ -36,7 +40,7 @@ const aggregateFileStats = (files = []) =>
     { totalFiles: 0, totalAdditions: 0, totalDeletions: 0 },
   );
 
-export default function CommitNode({ commit, repoInfo }) {
+export default function CommitNode({ commit, repoInfo, isExpanded, onToggleDiff, dimmed }) {
   const stats = aggregateFileStats(commit.files);
   const totalChanges = stats.totalAdditions + stats.totalDeletions;
   const heatColor = getHeatColor(totalChanges);
@@ -53,15 +57,25 @@ export default function CommitNode({ commit, repoInfo }) {
   const avatarColor = stringToColor(authorName);
   const initial = getInitials(authorName);
 
+  // Handle card body click (expand diff)
+  const handleCardClick = (e) => {
+    // Don't expand if clicking links/buttons
+    if (e.target.closest('a') || e.target.closest('.pill-hash') || e.target.closest('.commit-card__gh-btn')) {
+      return;
+    }
+    onToggleDiff?.(commit.sha);
+  };
+
   return (
-    <div className="commit-row">
+    <div className={`commit-row${dimmed ? ' commit-row--dimmed' : ''}`}>
       {/* Timeline dot */}
       <div className={`commit-dot${isLargeCommit ? ' commit-dot--large' : ''}`} />
 
       {/* Card */}
       <div
-        className="commit-card"
+        className={`commit-card${isExpanded ? ' commit-card--expanded' : ''}`}
         style={{ borderLeftColor: heatColor }}
+        onClick={handleCardClick}
       >
         {/* Ghost "↗ GitHub" button — appears on card hover */}
         <a
@@ -73,6 +87,11 @@ export default function CommitNode({ commit, repoInfo }) {
         >
           ↗ GitHub
         </a>
+
+        {/* Expand chevron */}
+        <span className={`commit-card__chevron${isExpanded ? ' commit-card__chevron--open' : ''}`}>
+          ▸
+        </span>
 
         {/* Row 1: Avatar + Author + Date */}
         <div className="commit-card__header">
@@ -142,6 +161,13 @@ export default function CommitNode({ commit, repoInfo }) {
           )}
         </div>
       </div>
+
+      {/* Inline Diff Viewer — accordion below card */}
+      {isExpanded && (
+        <div className="commit-row__diff-wrap">
+          <DiffViewer commit={commit} repoInfo={repoInfo} />
+        </div>
+      )}
     </div>
   );
 }

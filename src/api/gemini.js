@@ -144,3 +144,50 @@ export async function generateDeepAnalysis(commits, owner, repo, contributors, l
 export async function generateCommitSummary(commitsArray) {
   return generateDeepAnalysis(commitsArray, '', '', [], '', []);
 }
+
+/**
+ * Generate a comparison verdict for two repositories based on analytical metrics.
+ */
+export async function generateComparisonVerdict(repoA, repoB) {
+  const client = getClient();
+  if (!client) {
+    return { error: true, message: 'Gemini API key not configured.' };
+  }
+
+  const formatRepoData = (repo) => `
+  Repo: ${repo.owner}/${repo.name}
+  - Commits: ${repo.commits}, Contributors: ${repo.contributors}, Velocity: ${repo.velocity}/week
+  - Avg commit size: ${repo.avgCommitSize} lines, Churn rate: ${repo.churnRate}%
+  - File concentration: ${repo.fileConcentration}% in top 3 files
+  - Most changed files: ${repo.topFiles.join(', ')}
+  - Language: ${repo.language}
+  - Age: ${repo.age} days, Last commit: ${repo.daysSinceLast} days ago`;
+
+  const prompt = `Compare these two GitHub repositories based on their commit data:
+  
+  Repo A: ${formatRepoData(repoA)}
+  
+  Repo B: ${formatRepoData(repoB)}
+  
+  Answer these questions specifically using only the data above:
+  
+  1. Which repo shows healthier development practices and why? (cite specific metrics)
+  2. What does each repo's commit pattern suggest about its development style — collaborative vs solo, iterative vs big-bang, maintained vs abandoned?
+  3. What is the single biggest red flag in each repo if any?
+  4. If someone is evaluating these repos for production use or contribution, what is your one-sentence recommendation?
+  
+  Be specific. Reference exact numbers. No generic advice.
+  Maximum 120 words total. Use plain sentences, no bullet points.`;
+
+  try {
+    const response = await client.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+    });
+    return { error: false, verdict: response.text };
+  } catch (err) {
+    console.error('[GitTrace] Gemini API error:', err);
+    return { error: true, message: err.message || 'Failed to generate comparison verdict.' };
+  }
+}
+
