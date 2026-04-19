@@ -11,6 +11,7 @@
  *   aiStory     — { title, summary, vibe } from Gemini (or null).
  *   isAILoading — true while Gemini is generating a story.
  *   aiError     — error string from Gemini (or null).
+ *   repoInfo    — { owner, repo } parsed from URL (or null).
  *
  * EXPOSED ACTIONS:
  *   loadRepo(url)    — accepts a GitHub URL (or owner/repo string),
@@ -90,6 +91,9 @@ export default function useRepoData() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
 
+  // Parsed repo info — { owner, repo }
+  const [repoInfo, setRepoInfo] = useState(null);
+
   // AI story state
   const [aiStory, setAiStory] = useState(null);
   const [isAILoading, setIsAILoading] = useState(false);
@@ -135,6 +139,7 @@ export default function useRepoData() {
     setIsLoading(true);
     setData(null);
     setError(null);
+    setRepoInfo(null);
     setAiStory(null);
     setAiError(null);
 
@@ -150,6 +155,7 @@ export default function useRepoData() {
     }
 
     const { owner, repo } = parsed;
+    setRepoInfo({ owner, repo });
 
     // --- Step 2: Fetch live commits ---
     try {
@@ -174,6 +180,7 @@ export default function useRepoData() {
     isLoading,
     data,
     error,
+    repoInfo,
     aiStory,
     isAILoading,
     aiError,

@@ -1,155 +1,146 @@
 /* ============================================================
- * GitTrace — Gemini AI Service
+ * GitTrace — Gemini AI Service (Deep Analysis)
  * ------------------------------------------------------------
  * Integrates with the Google Gemini API via @google/genai SDK
- * to generate human-readable sprint summaries from commit data.
- *
- * FEATURES:
- *  1. Uses the `gemini-2.5-flash` model for fast generation.
- *  2. Enforces structured JSON output via `responseMimeType`.
- *  3. System prompt tuned for a Senior Engineering Manager
- *     persona producing 2-paragraph sprint updates.
- *  4. Graceful fallback if the API key is missing or the call
- *     fails — the app continues to work without AI insights.
+ * to generate structured repository analysis summaries.
  *
  * USAGE:
- *   import { generateCommitSummary } from './api/gemini';
- *   const story = await generateCommitSummary(commits);
- *   // → { title, summary, vibe } or { error: true, message }
+ *   import { generateDeepAnalysis } from './api/gemini';
+ *   const analysis = await generateDeepAnalysis(commits, owner, repo, contributors, language, hotspots);
  * ============================================================ */
 
 import { GoogleGenAI } from '@google/genai';
 
-// ------------------------------------------------------------
-// 1. Client Initialization
-// ------------------------------------------------------------
-
 const API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
-/**
- * Lazily initialize the Gemini client.  Returns null if no API
- * key is configured — the caller should treat this as "AI
- * features unavailable" rather than an error.
- */
 let _client = null;
 
 const getClient = () => {
   if (!API_KEY || API_KEY === 'your_gemini_api_key_here') {
-    console.warn(
-      '[GitTrace] No VITE_GEMINI_API_KEY found. AI Progress Stories are disabled.',
-    );
     return null;
   }
-
   if (!_client) {
     _client = new GoogleGenAI({ apiKey: API_KEY });
   }
   return _client;
 };
 
-// ------------------------------------------------------------
-// 2. System Prompt & Prompt Construction
-// ------------------------------------------------------------
-
-const SYSTEM_PROMPT = `You are a Senior Engineering Manager. I will provide a list of recent Git commits. Summarize this work into a concise, human-readable 2-paragraph sprint update. Focus on the 'why' and the overall progress, grouping related tasks together. Avoid technical jargon where possible.
-
-Along with the summary, provide:
-- "title": A catchy, short title for this batch of work (max 8 words). Be creative but professional. Examples: "The Performance Push", "Dark Mode & Beyond", "Bug Squash Marathon".
-- "summary": Your 2-paragraph sprint update.
-- "vibe": A single keyword that captures the overall mood of this batch. Pick ONE from: "Feature Shipping", "Bug Squashing", "Refactoring", "Performance", "Testing", "Documentation", "Maintenance", "Infrastructure", "UI Polish", "Security".
-
-Return ONLY a valid JSON object with exactly these three keys: "title", "summary", "vibe".`;
-
 /**
- * Build the user prompt containing the commit messages.
- *
- * @param {Array} commits - Array of commit objects.
- * @returns {string} - The user prompt string.
+ * Build the deep analysis prompt from actual commit data.
  */
-function buildUserPrompt(commits) {
-  // Extract just the commit messages (with author for context)
-  const commitList = commits
-    .map(
-      (c, i) =>
-        `${i + 1}. [${c.author?.name ?? 'Unknown'}] ${c.message.split('\n')[0]}`,
-    )
+function buildDeepPrompt(commits, owner, repo, contributors, language, hotspots) {
+  const sorted = [...commits].sort(
+    (a, b) => new Date(a.author?.date) - new Date(b.author?.date)
+  );
+  const firstDate = sorted[0]?.author?.date || 'unknown';
+  const lastDate = sorted[sorted.length - 1]?.author?.date || 'unknown';
+
+  const contribList = contributors
+    .slice(0, 5)
+    .map(c => `${c.name} (${c.commits} commits, +${c.additions} -${c.deletions})`)
+    .join('\n  ');
+
+  const commitLines = sorted
+    .map(c => {
+      const adds = c.stats?.additions ?? 0;
+      const dels = c.stats?.deletions ?? 0;
+      const date = c.author?.date?.slice(0, 10) || '?';
+      const author = c.author?.name || 'Unknown';
+      const msg = c.message?.split('\n')[0] || '';
+      return `${date} | ${author} | ${msg} | +${adds} -${dels}`;
+    })
     .join('\n');
 
-  return `Here are the recent Git commits to summarize:\n\n${commitList}`;
+  const hotspotLines = hotspots
+    .slice(0, 5)
+    .map(h => `${h.name}: ${h.size} changes`)
+    .join('\n  ');
+
+  return `You are analyzing a GitHub repository. Here is the raw commit data:
+
+Repository: ${owner}/${repo}
+Total commits analyzed: ${commits.length}
+Date range: ${firstDate} to ${lastDate}
+Contributors:
+  ${contribList}
+Primary language: ${language || 'Unknown'}
+
+Commits (chronological, oldest first):
+${commitLines}
+
+File change hotspots:
+  ${hotspotLines}
+
+Based ONLY on this data, write a structured repository summary. Return a JSON object with these exact keys:
+
+{
+  "project": "One sentence describing what this project is, specific, no fluff.",
+  "goal": "One to two sentences on the problem it solves or the value it provides.",
+  "timeline_duration": "Human readable duration like '3 weeks 2 days'",
+  "activity_pattern": "One sentence: burst of activity, steady, stale, etc.",
+  "features": [
+    { "date": "YYYY-MM-DD", "name": "Specific feature name extracted from commit message" }
+  ],
+  "biggest_change": "Describe the single largest commit by lines changed, what it did.",
+  "volatility": "Which files change most and what that implies about technical debt.",
+  "status": "Active|Slowing|Stale",
+  "days_since_last": 2
 }
 
-// ------------------------------------------------------------
-// 3. Public API
-// ------------------------------------------------------------
+RULES:
+- Extract REAL feature names from commit messages (look for feat:, add, implement, create, initial keywords)
+- Maximum 6 features in the list, pick the most important ones
+- Be specific. Use exact dates, filenames, and feature names from the data
+- Do not write marketing language. Do not pad with generic observations
+- Maximum 250 words total across all fields
+- Return ONLY valid JSON, no markdown`;
+}
 
 /**
- * Generate a structured AI "Progress Story" from an array of
- * commits using Google Gemini (@google/genai SDK).
- *
- * @param {Array} commitsArray - Array of commit objects (needs
- *                               at least `.message` and `.author.name`).
- * @returns {Promise<{title:string, summary:string, vibe:string} |
- *                   {error:true, message:string}>}
+ * Generate a deep structured analysis via Gemini.
  */
-export async function generateCommitSummary(commitsArray) {
-  // Guard: no commits → nothing to summarise
-  if (!commitsArray || commitsArray.length === 0) {
-    return { error: true, message: 'No commits to summarize.' };
+export async function generateDeepAnalysis(commits, owner, repo, contributors, language, hotspots) {
+  if (!commits || commits.length === 0) {
+    return { error: true, message: 'No commits to analyze.' };
   }
 
   const client = getClient();
 
-  // Guard: no API key → gracefully skip
   if (!client) {
     return {
       error: true,
-      message: 'Gemini API key not configured. Add VITE_GEMINI_API_KEY to your .env file.',
+      message: 'Gemini API key not configured.',
     };
   }
 
   try {
-    const userPrompt = buildUserPrompt(commitsArray);
+    const prompt = buildDeepPrompt(commits, owner, repo, contributors, language, hotspots);
 
     const response = await client.models.generateContent({
       model: 'gemini-2.5-flash',
-      contents: userPrompt,
+      contents: prompt,
       config: {
-        systemInstruction: SYSTEM_PROMPT,
         responseMimeType: 'application/json',
       },
     });
 
-    const text = response.text;
+    const parsed = JSON.parse(response.text);
 
-    // Parse the JSON response — Gemini should return valid JSON
-    // thanks to responseMimeType, but we wrap in try/catch anyway.
-    const parsed = JSON.parse(text);
-
-    // Validate the expected keys exist
-    if (!parsed.title || !parsed.summary || !parsed.vibe) {
-      console.warn('[GitTrace] Gemini response missing expected keys:', parsed);
-      return {
-        error: true,
-        message: 'AI returned an incomplete response. Please try again.',
-      };
+    if (!parsed.project) {
+      return { error: true, message: 'AI returned incomplete response.' };
     }
 
-    console.info('[GitTrace] AI Progress Story generated:', parsed.title);
     return parsed;
   } catch (err) {
     console.error('[GitTrace] Gemini API error:', err);
-
-    // Provide user-friendly error messages
-    if (err.message?.includes('API_KEY') || err.message?.includes('API key')) {
-      return {
-        error: true,
-        message: 'Invalid Gemini API key. Check your VITE_GEMINI_API_KEY.',
-      };
-    }
-
     return {
       error: true,
-      message: err.message || 'Failed to generate AI summary.',
+      message: err.message || 'Failed to generate AI analysis.',
     };
   }
+}
+
+/** Legacy export for backward compat */
+export async function generateCommitSummary(commitsArray) {
+  return generateDeepAnalysis(commitsArray, '', '', [], '', []);
 }
