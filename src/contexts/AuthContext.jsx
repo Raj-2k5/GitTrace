@@ -206,7 +206,8 @@ export function AuthProvider({ children }) {
       setExpiresAt(Date.now() + (data.expires_in || 900) * 1000);
       setAuthState('awaiting_user');
 
-      window.open(data.verification_uri || 'https://github.com/login/device', '_blank');
+      // Don't auto-open — browsers block window.open from async callbacks.
+      // The modal provides a prominent link the user clicks (always opens in front).
       startPolling(data.device_code, data.interval || 5);
 
     } catch (err) {

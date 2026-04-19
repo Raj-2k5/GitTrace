@@ -10,6 +10,7 @@
  * ============================================================ */
 
 import { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useAuth } from '../../contexts/AuthContext';
 
 function GitHubIcon() {
@@ -30,7 +31,7 @@ function SetupModal({ onClose }) {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  return (
+  return createPortal(
     <div className="auth-overlay" onClick={onClose}>
       <div className="auth-modal" onClick={e => e.stopPropagation()}>
         <div className="auth-modal__header">
@@ -100,7 +101,8 @@ Callback URL:        http://localhost:5173/auth/callback`}</pre>
 
         <button className="auth-modal__close-btn" onClick={onClose}>Close</button>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -140,7 +142,7 @@ function DeviceFlowModal({ onCancel }) {
 
   const isExpiringSoon = expiresAt && (expiresAt - Date.now()) < 120000;
 
-  return (
+  return createPortal(
     <div className="auth-overlay" onClick={onCancel}>
       <div className="auth-modal" onClick={e => e.stopPropagation()}>
 
@@ -159,8 +161,7 @@ function DeviceFlowModal({ onCancel }) {
               <GitHubIcon />
               <span className="auth-modal__title">Authorize GitTrace on GitHub</span>
             </div>
-            <p className="auth-modal__sub">A new tab has opened to github.com/login/device</p>
-            <p className="auth-modal__sub">Enter this code there:</p>
+            <p className="auth-modal__sub">Step 1: Copy this code</p>
 
             <div className="device-code">{userCode}</div>
 
@@ -168,12 +169,16 @@ function DeviceFlowModal({ onCancel }) {
               {copied ? '✓ Copied' : 'Copy code'}
             </button>
 
-            <div className="auth-modal__fallback">
-              If the tab didn't open:{' '}
-              <a href={verificationUri} target="_blank" rel="noopener noreferrer" className="setup-step__link">
-                Open github.com/login/device ↗
-              </a>
-            </div>
+            <p className="auth-modal__sub" style={{ marginTop: '16px' }}>Step 2: Open GitHub and paste it there</p>
+
+            <a
+              href={verificationUri}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="device-open-github-btn"
+            >
+              Open GitHub to authorize ↗
+            </a>
 
             <div className="auth-divider" />
 
@@ -214,7 +219,8 @@ function DeviceFlowModal({ onCancel }) {
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
