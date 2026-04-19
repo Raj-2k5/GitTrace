@@ -181,6 +181,18 @@ export default function useRepoData() {
     // AI story is NOT auto-triggered — user clicks the button.
   }, []);
 
+  /**
+   * Reset all state to initial values — used by logo click.
+   */
+  const resetRepo = useCallback(() => {
+    setIsLoading(false);
+    setData(null);
+    setError(null);
+    setRepoInfo(null);
+    setAiStory(null);
+    setAiError(null);
+  }, []);
+
   return {
     isLoading,
     data,
@@ -191,5 +203,6 @@ export default function useRepoData() {
     aiError,
     loadRepo,
     generateStory,
+    resetRepo,
   };
 }

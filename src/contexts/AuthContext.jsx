@@ -1,14 +1,15 @@
 /* ============================================================
- * GitTrace — Auth Context
+ * GitTrace — Auth Context (Device Flow)
  * ------------------------------------------------------------
- * Provides GitHub OAuth state, token management, and
- * rate-limit tracking to the entire app tree.
+ * Provides GitHub OAuth state via the Device Flow — no backend
+ * server or client_secret required. The entire flow runs in the
+ * browser using only the public client_id.
  *
  * Token priority:
- *   1. localStorage 'github_token' (from OAuth flow)
+ *   1. localStorage 'github_token' (from device flow)
  *   2. import.meta.env.VITE_GITHUB_TOKEN (PAT fallback)
  *
- * Rate-limit info is updated by API calls via updateRateLimit().
+ * Rate-limit info is updated by API calls via events.
  * ============================================================ */
 
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
@@ -16,12 +17,7 @@ import { getStoredUser, getToken, signOut } from '../utils/githubFetch';
 
 const AuthContext = createContext(null);
 
-// Generate a random CSRF token for OAuth state param
-function generateState() {
-  const arr = new Uint8Array(16);
-  crypto.getRandomValues(arr);
-  return Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
-}
+const CORS_PROXY = 'https://corsproxy.io/?';
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => getStoredUser());
@@ -34,27 +30,27 @@ export function AuthProvider({ children }) {
     resetAt: null,
   });
 
+  // Device flow state
+  const [authState, setAuthState] = useState('idle');
+  // idle | requesting | awaiting_user | success | expired | denied | error
+  const [userCode, setUserCode] = useState('');
+  const [verificationUri, setVerificationUri] = useState('');
+  const [expiresAt, setExpiresAt] = useState(null);
+  const [authError, setAuthError] = useState(null);
+  const [showSetupModal, setShowSetupModal] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const pollIntervalRef = useRef(null);
+
+  // Listen for global auth events
   useEffect(() => {
-    // Update UI when signed out programmatically
     const onSignOut = () => {
       setUser(null);
       setToken(null);
     };
-    
-    // Token expired mid-session
     const onExpired = () => {
       setUser(null);
       setToken(null);
-      // Show a toast: "Session expired — please sign in again"
     };
-
-    // Rate limit hit
-    const onRateLimited = (e) => {
-      const { resetDate } = e.detail;
-      // Show amber warning: "Rate limited — resets at {time}"
-    };
-
-    // Update rate limit display
     const onRateLimit = (e) => {
       const { remaining, limit } = e.detail;
       setRateLimitInfo(prev => ({ ...prev, remaining, limit }));
@@ -62,54 +58,190 @@ export function AuthProvider({ children }) {
 
     window.addEventListener('github-signed-out', onSignOut);
     window.addEventListener('github-auth-expired', onExpired);
-    window.addEventListener('github-rate-limited', onRateLimited);
     window.addEventListener('github-rate-limit', onRateLimit);
 
     return () => {
       window.removeEventListener('github-signed-out', onSignOut);
       window.removeEventListener('github-auth-expired', onExpired);
-      window.removeEventListener('github-rate-limited', onRateLimited);
       window.removeEventListener('github-rate-limit', onRateLimit);
     };
   }, []);
 
-  const login = useCallback(() => {
-    const clientId = import.meta.env.VITE_GITHUB_CLIENT_ID;
-    if (!clientId || clientId.includes('your_') || clientId.includes('_here')) {
-      alert(
-        'GitHub sign-in is not configured.\n\n' +
-        'Add VITE_GITHUB_CLIENT_ID to your .env file and restart Vite.'
-      );
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+    };
+  }, []);
+
+  // ── Handle successful auth ──
+  const handleSuccessfulAuth = useCallback(async (accessToken) => {
+    if (!accessToken.startsWith('gho_') && !accessToken.startsWith('ghp_')) {
+      setAuthError('Received invalid token from GitHub.');
+      setAuthState('error');
       return;
     }
 
-    // Save where user currently is to return after auth
-    sessionStorage.setItem('return_to', window.location.pathname);
+    localStorage.setItem('github_token', accessToken);
+    setToken(accessToken);
 
-    // Generate CSRF state token
-    let state;
     try {
-      state = crypto.randomUUID();
+      const userRes = await fetch('https://api.github.com/user', {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      if (!userRes.ok) throw new Error('Failed to fetch profile');
+      const userData = await userRes.json();
+      if (!userData.login) throw new Error('Invalid user response');
+
+      localStorage.setItem('github_user', JSON.stringify(userData));
+      setUser(userData);
     } catch {
-      state = Math.random().toString(36).substring(2) + Date.now();
+      // Token worked but profile fetch failed — still signed in
     }
-    sessionStorage.setItem('oauth_state', state);
 
-    // Build GitHub authorization URL
-    const params = new URLSearchParams({
-      client_id: clientId,
-      redirect_uri: import.meta.env.VITE_REDIRECT_URI,
-      scope: 'read:user repo',
-      state: state
-    });
-
-    // Redirect to GitHub
-    window.location.href = 
-      `https://github.com/login/oauth/authorize?${params.toString()}`;
+    setAuthState('success');
+    setTimeout(() => {
+      setShowAuthModal(false);
+      setAuthState('idle');
+    }, 1200);
   }, []);
 
+  // ── Poll for token ──
+  const startPolling = useCallback((deviceCode, intervalSeconds) => {
+    const clientId = import.meta.env.VITE_GITHUB_CLIENT_ID;
+
+    pollIntervalRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(
+          CORS_PROXY + encodeURIComponent('https://github.com/login/oauth/access_token'),
+          {
+            method: 'POST',
+            headers: {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              client_id: clientId,
+              device_code: deviceCode,
+              grant_type: 'urn:ietf:params:oauth:grant-type:device_code'
+            })
+          }
+        );
+
+        const data = await res.json();
+
+        if (data.access_token) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+          await handleSuccessfulAuth(data.access_token);
+          return;
+        }
+
+        if (data.error === 'authorization_pending') return;
+
+        if (data.error === 'slow_down') {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+          startPolling(deviceCode, intervalSeconds + 5);
+          return;
+        }
+
+        if (data.error === 'expired_token') {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+          setAuthState('expired');
+          setAuthError('Code expired. Please try again.');
+          return;
+        }
+
+        if (data.error === 'access_denied') {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+          setAuthState('denied');
+          setAuthError('Authorization was cancelled on GitHub.');
+          return;
+        }
+      } catch (err) {
+        console.warn('Poll attempt failed:', err.message);
+      }
+    }, intervalSeconds * 1000);
+  }, [handleSuccessfulAuth]);
+
+  // ── Initiate device flow ──
+  const initiateDeviceFlow = useCallback(async () => {
+    const clientId = import.meta.env.VITE_GITHUB_CLIENT_ID;
+    setAuthState('requesting');
+    setAuthError(null);
+    setShowAuthModal(true);
+
+    try {
+      const res = await fetch(
+        CORS_PROXY + encodeURIComponent('https://github.com/login/device/code'),
+        {
+          method: 'POST',
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            client_id: clientId,
+            scope: 'read:user repo'
+          })
+        }
+      );
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.message || `GitHub responded with ${res.status}`);
+      }
+
+      const data = await res.json();
+
+      if (!data.user_code || !data.device_code) {
+        throw new Error('Invalid response from GitHub device flow. Ensure Device Flow is enabled on your OAuth App.');
+      }
+
+      setUserCode(data.user_code);
+      setVerificationUri(data.verification_uri || 'https://github.com/login/device');
+      setExpiresAt(Date.now() + (data.expires_in || 900) * 1000);
+      setAuthState('awaiting_user');
+
+      window.open(data.verification_uri || 'https://github.com/login/device', '_blank');
+      startPolling(data.device_code, data.interval || 5);
+
+    } catch (err) {
+      setAuthState('error');
+      setAuthError(err.message || 'Failed to start device flow.');
+    }
+  }, [startPolling]);
+
+  // ── Login entry point ──
+  const login = useCallback(() => {
+    const clientId = import.meta.env.VITE_GITHUB_CLIENT_ID;
+    if (!clientId || clientId.includes('your_') || clientId === 'undefined' || clientId === '') {
+      setShowSetupModal(true);
+      return;
+    }
+    initiateDeviceFlow();
+  }, [initiateDeviceFlow]);
+
+  // ── Cancel auth ──
+  const cancelAuth = useCallback(() => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+    setShowAuthModal(false);
+    setAuthState('idle');
+    setUserCode('');
+    setAuthError(null);
+  }, []);
+
+  // ── Logout ──
   const logout = useCallback(() => {
     signOut();
+    setUser(null);
+    setToken(null);
   }, []);
 
   const updateRateLimit = useCallback((remaining, limit, resetTimestamp) => {
@@ -130,6 +262,18 @@ export function AuthProvider({ children }) {
     login,
     logout,
     updateRateLimit,
+    // Device flow state
+    authState,
+    userCode,
+    verificationUri,
+    expiresAt,
+    authError,
+    showSetupModal,
+    setShowSetupModal,
+    showAuthModal,
+    setShowAuthModal,
+    cancelAuth,
+    initiateDeviceFlow,
   };
 
   return (

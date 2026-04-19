@@ -69,10 +69,11 @@ function App() {
     error,
     repoInfo,
     loadRepo,
+    resetRepo,
   } = useRepoData();
 
   // Auth & Rate Limit
-  const { updateRateLimit, isAuthenticated } = useAuth();
+  const { isAuthenticated } = useAuth();
 
 
 
@@ -112,6 +113,16 @@ function App() {
       loadRepo(url);
     }
   };
+
+  // Handle logo click — reset everything and go home
+  const handleLogoClick = useCallback(() => {
+    resetRepo();
+    setUrl('');
+    setCompareMode(false);
+    navigate('/');
+    window.history.replaceState({}, '', '/');
+    document.title = 'GitTrace — GitHub Repository Analyzer';
+  }, [resetRepo, navigate]);
 
   // Update URL when repo loads successfully
   useEffect(() => {
@@ -192,7 +203,13 @@ function App() {
 
       {/* ═══════════ STICKY HEADER ═══════════ */}
       <header className="app-header">
-        <span className="app-header__brand">GitTrace</span>
+        <button
+          className="app-header__brand"
+          onClick={handleLogoClick}
+          aria-label="GitTrace home — clear and start over"
+        >
+          GitTrace
+        </button>
 
         <div className="app-header__search-wrap">
           <form

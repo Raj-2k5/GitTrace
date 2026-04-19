@@ -1,59 +1,61 @@
-import { getActiveToken } from '../contexts/AuthContext';
-
-let _rateLimitCallback = null;
-
-/**
- * Set a generic callback to receive rate-limit updates after each API response.
- * Tied to AuthContext in App.jsx.
- */
-export function setRateLimitCallback(cb) {
-  _rateLimitCallback = cb;
-}
-
 /**
  * Centralised GitHub API fetch utility.
  * - Injects the active token (OAuth or PAT).
  * - Appends the standard GitHub v3 Accept header.
- * - Automatically tracks rate limit headers via callback.
+ * - Automatically tracks rate limit headers via events.
  * - Handles 401 (expired token) and 403 (rate limited).
  */
+
+let _rateLimitCallback = null;
+
+export function setRateLimitCallback(cb) {
+  _rateLimitCallback = cb;
+}
+
 export default function githubFetch(url, options = {}) {
-  const token = getActiveToken();
-  const headers = new Headers(options.headers || {});
+  const token = localStorage.getItem('github_token') || 
+                (typeof import.meta !== 'undefined' ? import.meta.env?.VITE_GITHUB_TOKEN : null);
   
+  const headers = new Headers(options.headers || {});
   headers.set('Accept', 'application/vnd.github.v3+json');
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
   }
 
   return fetch(url, { ...options, headers }).then((res) => {
-    // Notify rate limit via callback
-    if (_rateLimitCallback && res.headers) {
+    // Notify rate limit via callback and event
+    if (res.headers) {
       const remaining = res.headers.get('x-ratelimit-remaining');
       const limit = res.headers.get('x-ratelimit-limit');
       const reset = res.headers.get('x-ratelimit-reset');
       
       if (remaining !== null) {
-        _rateLimitCallback(
-          parseInt(remaining, 10),
-          parseInt(limit, 10),
-          parseInt(reset, 10)
-        );
+        if (_rateLimitCallback) {
+          _rateLimitCallback(
+            parseInt(remaining, 10),
+            parseInt(limit, 10),
+            parseInt(reset, 10)
+          );
+        }
+        window.dispatchEvent(new CustomEvent('github-rate-limit', {
+          detail: {
+            remaining: parseInt(remaining, 10),
+            limit: parseInt(limit, 10),
+            reset: parseInt(reset, 10)
+          }
+        }));
       }
     }
 
     if (res.status === 401) {
-      // Unauthorised / Expired
-      console.warn('[GitTrace] GitHub session expired or invalid token.');
       localStorage.removeItem('github_token');
       localStorage.removeItem('github_user');
-      // For a real app, you might dispatch a global toast event here
-      return res; // let the caller handle the 401 too if needed
+      window.dispatchEvent(new CustomEvent('github-auth-expired'));
+      return res;
     }
 
     if (res.status === 403) {
       console.warn('[GitTrace] Rate limited by GitHub API.');
-      // Caller can handle 403 appropriately
       return res;
     }
 
