@@ -14,7 +14,7 @@
  *  • Notification toasts
  * ============================================================ */
 
-import { useState, useMemo, useCallback, useEffect } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { Helmet } from 'react-helmet-async';
 import useRepoData from './hooks/useRepoData';
@@ -53,11 +53,179 @@ const EXAMPLE_REPOS = [
   'tailwindlabs/tailwindcss',
 ];
 
+const MIN_LEFT_PERCENT = 35;
+const MAX_LEFT_PERCENT = 70;
+const DEFAULT_LEFT_PERCENT = 58;
+
+function DividerHandle({ onDrag, isDragging, setIsDragging }) {
+  const handleRef = useRef(null);
+
+  function onMouseDown(e) {
+    e.preventDefault();
+    setIsDragging(true);
+    const container = handleRef.current.closest('[data-panel-container]');
+
+    function onMouseMove(moveEvent) {
+      if (!container) return;
+      const containerRect = container.getBoundingClientRect();
+      const newLeftPercent = ((moveEvent.clientX - containerRect.left) / containerRect.width) * 100;
+      const clamped = Math.min(MAX_LEFT_PERCENT, Math.max(MIN_LEFT_PERCENT, newLeftPercent));
+      onDrag(Math.round(clamped * 10) / 10);
+    }
+
+    function onMouseUp() {
+      setIsDragging(false);
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    }
+
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }
+
+  function onTouchStart(e) {
+    setIsDragging(true);
+    const container = handleRef.current.closest('[data-panel-container]');
+
+    function onTouchMove(moveEvent) {
+      if (!moveEvent.cancelable) return;
+      moveEvent.preventDefault();
+      if (!container) return;
+      const touch = moveEvent.touches[0];
+      const containerRect = container.getBoundingClientRect();
+      const newLeftPercent = ((touch.clientX - containerRect.left) / containerRect.width) * 100;
+      const clamped = Math.min(MAX_LEFT_PERCENT, Math.max(MIN_LEFT_PERCENT, newLeftPercent));
+      onDrag(Math.round(clamped * 10) / 10);
+    }
+
+    function onTouchEnd() {
+      setIsDragging(false);
+      document.removeEventListener('touchmove', onTouchMove);
+      document.removeEventListener('touchend', onTouchEnd);
+      document.body.style.userSelect = '';
+    }
+
+    document.body.style.userSelect = 'none';
+    document.addEventListener('touchmove', onTouchMove, { passive: false });
+    document.addEventListener('touchend', onTouchEnd);
+  }
+
+  function handleDoubleClick() {
+    onDrag(DEFAULT_LEFT_PERCENT);
+    localStorage.removeItem('gittrace_panel_split');
+  }
+
+  return (
+    <div
+      ref={handleRef}
+      onMouseDown={onMouseDown}
+      onTouchStart={onTouchStart}
+      onDoubleClick={handleDoubleClick}
+      title="Drag to resize panels&#10;Double-click to reset to default split"
+      className="divider-handle-wrap"
+      style={{
+        width: '12px',
+        flexShrink: 0,
+        position: 'relative',
+        cursor: 'col-resize',
+        display: 'flex',
+        alignItems: 'stretch',
+        justifyContent: 'center',
+        margin: '0 -2px',
+        zIndex: 10
+      }}
+    >
+      <div style={{
+        width: '2px',
+        background: isDragging ? '#4FEFBC' : 'rgba(255,255,255,0.08)',
+        borderRadius: '1px',
+        transition: 'background 0.15s ease',
+        position: 'relative'
+      }}>
+        <div style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '3px',
+          opacity: isDragging ? 1 : 0,
+          transition: 'opacity 0.15s ease'
+        }}>
+          {[0,1,2].map(i => (
+            <div key={i} style={{ width: '4px', height: '4px', borderRadius: '50%', background: '#4FEFBC' }} />
+          ))}
+        </div>
+      </div>
+      <div style={{
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        left: '-4px',
+        right: '-4px'
+      }}
+        onMouseEnter={e => {
+          const line = e.currentTarget.previousSibling;
+          const grip = line?.querySelector('div[style*="flex-direction: column"]');
+          if (line && grip && !isDragging) {
+            line.style.background = 'rgba(255,255,255,0.20)';
+            grip.style.opacity = '0.5';
+          }
+        }}
+        onMouseLeave={e => {
+          const line = e.currentTarget.previousSibling;
+          const grip = line?.querySelector('div[style*="flex-direction: column"]');
+          if (line && grip && !isDragging) {
+            line.style.background = 'rgba(255,255,255,0.08)';
+            grip.style.opacity = '0';
+          }
+        }}
+      />
+    </div>
+  );
+}
+
 function App() {
   const [url, setUrl] = useState('');
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
+
+  // Panel resizing state
+  const [leftPercent, setLeftPercent] = useState(() => {
+    const saved = localStorage.getItem('gittrace_panel_split');
+    if (saved) {
+      const parsed = parseFloat(saved);
+      if (parsed >= MIN_LEFT_PERCENT && parsed <= MAX_LEFT_PERCENT) {
+        return parsed;
+      }
+    }
+    return DEFAULT_LEFT_PERCENT;
+  });
+  const [isDragging, setIsDragging] = useState(false);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(1000);
+  const leftPanelRef = useRef(null);
+
+  useEffect(() => {
+    localStorage.setItem('gittrace_panel_split', leftPercent.toString());
+  }, [leftPercent]);
+
+  useEffect(() => {
+    const observer = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        setLeftPanelWidth(entry.contentRect.width);
+      }
+    });
+    if (leftPanelRef.current) {
+      observer.observe(leftPanelRef.current);
+    }
+    return () => observer.disconnect();
+  }, []);
 
   // Compare mode state
   const [compareMode, setCompareMode] = useState(false);
@@ -452,9 +620,30 @@ function App() {
         />
       ) : (
         /* ── TWO-PANEL LAYOUT ── */
-        <div className="panels">
+        <div 
+          className="panels"
+          data-panel-container="true"
+          style={{
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'stretch',
+            width: '100%',
+            position: 'relative'
+          }}
+        >
           {/* LEFT PANEL — Repo Analysis + Commit Timeline */}
-          <div className="panel-left">
+          <div 
+            className={`panel-left ${leftPanelWidth < 380 ? 'panel-compact' : ''}`}
+            ref={leftPanelRef}
+            style={{
+              width: `${leftPercent}%`,
+              flexBasis: `${leftPercent}%`,
+              maxWidth: `${leftPercent}%`,
+              minWidth: 0,
+              flexShrink: 0,
+              transition: isDragging ? 'none' : 'width 0.1s ease, max-width 0.1s ease, flex-basis 0.1s ease'
+            }}
+          >
             {/* Repository Analysis Card */}
             {hasData && (
               <RepoAnalysisCard
@@ -471,8 +660,18 @@ function App() {
             />
           </div>
 
+          <DividerHandle onDrag={setLeftPercent} isDragging={isDragging} setIsDragging={setIsDragging} />
+
           {/* RIGHT PANEL — Heatmap + Contributors */}
-          <div className="panel-right">
+          <div 
+            className="panel-right"
+            style={{
+              flex: 1,
+              minWidth: 0,
+              maxWidth: 'none',
+              width: 'auto'
+            }}
+          >
             {isLoading ? (
               <>
                 <div className="heatmap-card">

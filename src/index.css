@@ -747,20 +747,13 @@ img {
 }
 
 .panel-left {
-  flex: 0 0 58%;
-  width: 58%;
   display: flex;
   flex-direction: column;
   height: auto;
   overflow: visible;
-  border-right: var(--border-default);
 }
 
 .panel-right {
-  flex: 0 0 42%;
-  width: 42%;
-  max-width: 42%;
-  min-width: 0;
   position: sticky;
   top: calc(var(--header-height) + var(--metadata-height));
   height: calc(100vh - var(--header-height) - var(--metadata-height));
@@ -769,6 +762,38 @@ img {
   padding: 20px;
   align-self: flex-start;
   z-index: 10;
+}
+
+/* Compact layout for narrow left panel */
+.panel-compact .commit-card {
+  padding: 10px 12px;
+}
+.panel-compact .commit-card__message {
+  font-size: 13px;
+}
+.panel-compact .commit-card__footer {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* Mobile Stack */
+@media (max-width: 768px) {
+  .panels {
+    flex-direction: column !important;
+  }
+  .divider-handle-wrap {
+    display: none !important;
+  }
+  .panel-left,
+  .panel-right {
+    width: 100% !important;
+    max-width: 100% !important;
+    flex-basis: auto !important;
+  }
+  .panel-right {
+    position: static !important;
+    height: auto !important;
+  }
 }
 
 /* =============================================

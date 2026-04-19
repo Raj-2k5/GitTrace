@@ -17,7 +17,8 @@ import { getStoredUser, getToken, signOut } from '../utils/githubFetch';
 
 const AuthContext = createContext(null);
 
-const CORS_PROXY = 'https://corsproxy.io/?';
+// We use a local proxy in dev (via vite.config.js) to avoid CORS issues
+const GITHUB_LOGIN_BASE = '/github-login';
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => getStoredUser());
@@ -113,7 +114,7 @@ export function AuthProvider({ children }) {
     pollIntervalRef.current = setInterval(async () => {
       try {
         const res = await fetch(
-          CORS_PROXY + encodeURIComponent('https://github.com/login/oauth/access_token'),
+          `${GITHUB_LOGIN_BASE}/oauth/access_token`,
           {
             method: 'POST',
             headers: {
@@ -176,7 +177,7 @@ export function AuthProvider({ children }) {
 
     try {
       const res = await fetch(
-        CORS_PROXY + encodeURIComponent('https://github.com/login/device/code'),
+        `${GITHUB_LOGIN_BASE}/device/code`,
         {
           method: 'POST',
           headers: {
